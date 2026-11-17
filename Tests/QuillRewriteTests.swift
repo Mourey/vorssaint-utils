@@ -77,8 +77,11 @@ enum QuillRewriteTests {
                      "a child that exits without reading its input ends the run without SIGPIPE")
 
         let environment = run("/usr/bin/env", [], input: Data(), environment: ["A": "1"])
+        // The message counts lines and never prints them: an inherited
+        // environment would carry secrets into a public test log.
+        let environmentLines = environment.output.split(separator: UInt8(ascii: "\n")).count
         suite.expect(environment.status == 0 && environment.output == Data("A=1\n".utf8),
-                     "the child sees exactly the environment it was given, got \(String(decoding: environment.output, as: UTF8.self).debugDescription)")
+                     "the child sees exactly the environment it was given, got \(environmentLines) line(s), status \(environment.status), exact match: \(environment.output == Data("A=1\n".utf8))")
     }
 
     // MARK: Fixtures, copied from quill's src/quill/cli.py at 59ec15f
