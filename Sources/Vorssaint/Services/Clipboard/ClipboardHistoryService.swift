@@ -981,6 +981,27 @@ final class ClipboardHistoryService: ObservableObject {
         save()
     }
 
+    /// A rewritten text joins the history the way a copy would, and the
+    /// entry it was made from stays. Nil when the capture rules refuse it.
+    @discardableResult
+    func addRewrittenText(_ text: String) -> ClipboardHistoryEntry? {
+        let rejectsSensitive = UserDefaults.standard.bool(forKey: DefaultsKey.clipboardHistoryFilterSensitiveText)
+        guard let added = ClipboardHistoryEditing.entriesAddingText(text, to: entries, now: Date(),
+                                                                   rejectsSensitive: rejectsSensitive)
+        else { return nil }
+        entries = added.entries
+        trimToLimit()
+        save()
+        return entries.first { $0.id == added.entry.id }
+    }
+
+    /// Selects an entry whose rewrite just finished, so the preview shows it.
+    func selectRewrittenEntry(_ id: UUID) {
+        guard entries.contains(where: { $0.id == id }) else { return }
+        quickSelectionID = id
+        quickSelectionIsVisible = true
+    }
+
     func trimToLimit() {
         let limit = Defaults.sanitizedClipboardHistoryLimit(
             UserDefaults.standard.integer(forKey: DefaultsKey.clipboardHistoryLimit)
@@ -1266,6 +1287,7 @@ final class ClipboardHistoryService: ObservableObject {
 
     func showHistoryWindow(preferNotch: Bool = true) {
         if preferNotch, NotchSupport.routesClipboardWindow(), NotchService.shared.showClipboard() { return }
+        MainActor.assumeIsolated { QuillRewriteService.refreshForPanel() }
         let panel = ensurePanel()
         rememberPasteTarget()
         refreshQuickLayout()
@@ -1507,6 +1529,15 @@ final class ClipboardHistoryService: ObservableObject {
                 }
                 if modifiers.isEmpty {
                     self.copySelectedQuickEntry()
+                    return nil
+                }
+                // Option+Return opens the selected text entry's quill modes.
+                if QuillRewriteSupport.claimsModePicker(keyCode: event.keyCode, modifiers: modifiers,
+                                                        selectedKind: self.selectedQuickEntry?.kind,
+                                                        rewriteAvailable: AppFeature.quillRewrite.isAvailable,
+                                                        historyAvailable: AppFeature.clipboardHistory.isAvailable),
+                   let entry = self.selectedQuickEntry {
+                    MainActor.assumeIsolated { QuillRewriteService.shared.showModePicker(for: entry) }
                     return nil
                 }
                 return event

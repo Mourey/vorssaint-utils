@@ -6,6 +6,7 @@ import SwiftUI
 struct ClipboardQuickPanelView: View {
     @ObservedObject private var l10n = L10n.shared
     @ObservedObject private var history = ClipboardHistoryService.shared
+    @ObservedObject private var rewrite = QuillRewriteService.shared
     @FocusState private var searchFocused: Bool
     @State private var previewSelection = QuickPreviewSelection()
     @State private var previewIsEditing = false
@@ -264,7 +265,11 @@ struct ClipboardQuickPanelView: View {
                        previewIsEditing: previewIsEditing,
                        presentationID: history.quickWindowPresentationID,
                        language: l10n.language,
-                       previewSelection: previewSelection)
+                       previewSelection: previewSelection,
+                       rewriteState: rewrite.states[entry.id],
+                       showsModePicker: rewrite.modePickerEntryID == entry.id,
+                       rewriteModes: rewrite.modes,
+                       rewriteBusy: rewrite.isRunning)
             .equatable()
             .id(entry.id)
     }
@@ -350,15 +355,17 @@ private struct QuickPreviewPane: View {
     @Binding var isEditing: Bool
     let onClose: () -> Void
     @ObservedObject private var history = ClipboardHistoryService.shared
+    @ObservedObject private var rewrite = QuillRewriteService.shared
 
     var body: some View {
+        let entry = ClipboardHistorySelection.previewEntry(preferredID: selection.entryID,
+                                                           visibleEntries: history.filteredQuickEntries,
+                                                           selectedEntry: history.selectedQuickEntry)
         ClipboardEntryPreviewSidebar(text: text,
-                                     entry: ClipboardHistorySelection.previewEntry(
-                                        preferredID: selection.entryID,
-                                        visibleEntries: history.filteredQuickEntries,
-                                        selectedEntry: history.selectedQuickEntry),
+                                     entry: entry,
                                      isEditing: $isEditing,
-                                     onClose: onClose)
+                                     onClose: onClose,
+                                     rewrite: entry.flatMap { rewrite.states[$0.id] })
     }
 }
 
@@ -378,6 +385,12 @@ private struct QuickEntryView: View, Equatable {
     let presentationID: UUID
     let language: AppLanguage
     let previewSelection: QuickPreviewSelection
+    /// Rewrite with quill: this entry's state, whether its mode list is open,
+    /// the modes to offer and whether a rewrite runs anywhere in the panel.
+    let rewriteState: QuillRewriteState?
+    let showsModePicker: Bool
+    let rewriteModes: [QuillRewriteMode]?
+    let rewriteBusy: Bool
     @State private var isHovered = false
     /// The pane follows a row only once the pointer has rested on it: while
     /// rows stream under a still pointer during a scroll, every one of them
@@ -389,6 +402,13 @@ private struct QuickEntryView: View, Equatable {
     private var history: ClipboardHistoryService { .shared }
     private var l10n: L10n { .shared }
     private var text: ClipboardFeatureStrings { FeatureStrings.clipboard(language) }
+    private var rewriteText: QuillRewriteStrings { QuillRewriteStrings.localized(language) }
+
+    private var offersRewrite: Bool {
+        QuillRewriteSupport.offersRewrite(kind: entry.kind,
+                                          rewriteAvailable: AppFeature.quillRewrite.isAvailable,
+                                          historyAvailable: AppFeature.clipboardHistory.isAvailable)
+    }
 
     private var isRow: Bool { layout == .list }
 
@@ -405,6 +425,10 @@ private struct QuickEntryView: View, Equatable {
             && lhs.previewIsEditing == rhs.previewIsEditing
             && lhs.presentationID == rhs.presentationID
             && lhs.language == rhs.language
+            && lhs.rewriteState == rhs.rewriteState
+            && lhs.showsModePicker == rhs.showsModePicker
+            && lhs.rewriteModes == rhs.rewriteModes
+            && lhs.rewriteBusy == rhs.rewriteBusy
     }
 
     var body: some View {
@@ -413,6 +437,7 @@ private struct QuickEntryView: View, Equatable {
         }
         .contentShape(Rectangle())
         .contextMenu { entryActions(entry) }
+        .popover(isPresented: modePickerPresented, arrowEdge: isRow ? .trailing : .bottom) { modePicker }
         .onHover { hovering in
             // A row arriving under a pointer that has not moved since the
             // arrow keys took over is not a hover.
@@ -648,9 +673,91 @@ private struct QuickEntryView: View, Equatable {
         }
     }
 
+    /// Open while the service names this entry; closing it clears that.
+    private var modePickerPresented: Binding<Bool> {
+        Binding(get: { showsModePicker && offersRewrite },
+                set: { presented in
+                    if !presented, QuillRewriteService.shared.modePickerEntryID == entry.id {
+                        QuillRewriteService.shared.modePickerEntryID = nil
+                    }
+                })
+    }
+
+    private var modePicker: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(rewriteText.rewriteWithAction)
+                .font(.system(size: 10.5, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 6)
+                .padding(.bottom, 4)
+            if let modes = rewriteModes, !modes.isEmpty {
+                ForEach(modes, id: \.id) { mode in
+                    Button {
+                        QuillRewriteService.shared.start(entry: entry, modeID: mode.id)
+                    } label: {
+                        Text(mode.name)
+                            .font(.system(size: 12))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 3)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(rewriteBusy)
+                    .help(mode.summary)
+                }
+            } else {
+                Text(QuillRewriteSupport.message(for: .modesUnavailable, strings: rewriteText))
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 6)
+            }
+        }
+        .padding(10)
+        .frame(minWidth: 220, alignment: .leading)
+    }
+
+    /// While a rewrite runs, or after it failed, its state takes the place of
+    /// the entry's trailing content. Entries without a rewrite are unchanged.
+    @ViewBuilder
+    private var rewriteStatus: some View {
+        switch rewriteState {
+        case .running?:
+            HStack(spacing: 5) {
+                ProgressView()
+                    .controlSize(.mini)
+                Text(rewriteText.rewriting)
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.secondary)
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(rewriteText.rewriting)
+        case .failed(let message)?:
+            Text(message)
+                .font(.system(size: 10.5))
+                .foregroundStyle(Color.red.opacity(0.85))
+                .lineLimit(isRow ? 2 : 3)
+                .multilineTextAlignment(.trailing)
+                .frame(maxWidth: isRow ? 200 : 120, alignment: .trailing)
+                .help(message)
+                .accessibilityLabel(message)
+        default:
+            EmptyView()
+        }
+    }
+
+    private var showsRewriteStatus: Bool {
+        switch rewriteState {
+        case .running?, .failed?: return true
+        default: return false
+        }
+    }
+
     @ViewBuilder
     private func entryTrailing(_ entry: ClipboardHistoryEntry, isHovered: Bool) -> some View {
-        if isHovered {
+        if showsRewriteStatus {
+            rewriteStatus
+        } else if isHovered {
             HStack(spacing: 4) {
                 if entry.kind == .image, AppFeature.screenshot.isAvailable {
                     Button { history.editImage(entry) } label: {
@@ -728,6 +835,23 @@ private struct QuickEntryView: View, Equatable {
         Divider()
         Button(text.delete, role: .destructive) {
             history.remove(entry)
+        }
+        if QuillRewriteSupport.offersRewrite(kind: entry.kind,
+                                             rewriteAvailable: AppFeature.quillRewrite.isAvailable,
+                                             historyAvailable: AppFeature.clipboardHistory.isAvailable) {
+            Divider()
+            Button(rewriteText.rewriteAction) {
+                QuillRewriteService.shared.start(entry: entry, modeID: nil)
+            }
+            .disabled(rewriteBusy)
+            Menu(rewriteText.rewriteWithAction) {
+                ForEach(rewriteModes ?? [], id: \.id) { mode in
+                    Button(mode.name) {
+                        QuillRewriteService.shared.start(entry: entry, modeID: mode.id)
+                    }
+                }
+            }
+            .disabled(rewriteBusy || (rewriteModes ?? []).isEmpty)
         }
     }
 

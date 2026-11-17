@@ -251,3 +251,98 @@ enum BoundedProcessRunner {
         return pid
     }
 }
+
+extension BoundedProcessRunner {
+    /// A run whose child read its input on stdin, with its stdout and stderr
+    /// kept apart.
+    struct SplitResult {
+        let status: Int32
+        let output: Data
+        let errorOutput: Data
+        let timedOut: Bool
+    }
+
+    private static let inputQueue = DispatchQueue(label: "BoundedProcessRunner.input",
+                                                  qos: .userInitiated, attributes: .concurrent)
+
+    /// Runs the child with `input` on its stdin and exactly `environment`,
+    /// which is never merged with the app's own. The input is written on a
+    /// queue of its own while both output pipes drain, so a child that answers
+    /// before it has read everything cannot deadlock the run. A child that
+    /// exits without reading fails the write instead of ending the app.
+    static func run(_ path: String,
+                    _ arguments: [String],
+                    input: Data,
+                    timeout: TimeInterval,
+                    maxOutputBytes: Int,
+                    maxErrorBytes: Int,
+                    environment: [String: String],
+                    cancellation: BoundedProcessCancellation? = nil) -> SplitResult {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: path)
+        process.arguments = arguments
+        process.environment = environment
+        let inputPipe = Pipe()
+        let outputPipe = Pipe()
+        let errorPipe = Pipe()
+        process.standardInput = inputPipe
+        process.standardOutput = outputPipe
+        process.standardError = errorPipe
+        let writer = inputPipe.fileHandleForWriting
+        guard fcntl(writer.fileDescriptor, F_SETNOSIGPIPE, 1) != -1 else {
+            return SplitResult(status: -1, output: Data(), errorOutput: Data(), timedOut: false)
+        }
+
+        let errors = BoundedProcessOutput(limit: maxErrorBytes)
+        let errorsDrained = DispatchSemaphore(value: 0)
+        let errorReader = errorPipe.fileHandleForReading
+        errorReader.readabilityHandler = { handle in
+            let chunk = handle.availableData
+            if chunk.isEmpty { errorsDrained.signal() } else { errors.append(chunk) }
+        }
+
+        var launched = false
+        defer { cancellation?.release(process) }
+        let result = collect(from: outputPipe, timeout: timeout, maxOutputBytes: maxOutputBytes) { finished in
+            process.terminationHandler = { _ in finished.signal() }
+            if let cancellation { try cancellation.launch(process) }
+            else { try process.run() }
+            launched = true
+            inputQueue.async { write(input, to: writer) }
+            return BoundedChild(pid: process.processIdentifier,
+                                terminate: { process.terminate() },
+                                status: { process.terminationStatus })
+        }
+        if !launched { try? writer.close() }
+
+        // The output pipe has already had its moment for a late tail; stderr
+        // closes at the same exit, so the same short wait is enough.
+        if launched { _ = errorsDrained.wait(timeout: .now() + 0.2) }
+        errorReader.readabilityHandler = nil
+        try? errorReader.close()
+
+        return SplitResult(status: result.status, output: result.output,
+                           errorOutput: errors.value(), timedOut: result.timedOut)
+    }
+
+    /// Writes all of `data`, then closes the handle so the child sees the end
+    /// of its input. A failed write (the child is gone) stops early.
+    private static func write(_ data: Data, to handle: FileHandle) {
+        let descriptor = handle.fileDescriptor
+        data.withUnsafeBytes { (buffer: UnsafeRawBufferPointer) in
+            guard let base = buffer.baseAddress else { return }
+            var offset = 0
+            while offset < buffer.count {
+                let written = Darwin.write(descriptor, base + offset, buffer.count - offset)
+                if written > 0 {
+                    offset += written
+                } else if written == -1 && errno == EINTR {
+                    continue
+                } else {
+                    break
+                }
+            }
+        }
+        try? handle.close()
+    }
+}
