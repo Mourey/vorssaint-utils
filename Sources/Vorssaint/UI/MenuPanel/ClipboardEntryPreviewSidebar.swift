@@ -13,12 +13,24 @@ struct ClipboardEntryPreviewSidebar: View {
     var entry: ClipboardHistoryEntry?
     @Binding var isEditing: Bool
     var onClose: () -> Void
+    /// The entry's Rewrite with quill state. With none, nothing here changes.
+    var rewrite: QuillRewriteState? = nil
     @State private var draft = ""
     @State private var editingEntryID: UUID?
     /// Laid out off the main thread for the entry it was made from.
     @State private var prettyJSON: (entry: ClipboardHistoryEntry, text: String)?
     @FocusState private var editorFocused: Bool
     @State private var recognizingEntryID: UUID?
+    /// The entry whose rewrite the history refused to keep.
+    @State private var unsavedRewriteEntryID: UUID?
+
+    private var rewriteText: QuillRewriteStrings { QuillRewriteStrings.localized(l10n.language) }
+
+    /// The before and after text while a successful rewrite is held.
+    private var heldRewrite: (original: String, rewritten: String)? {
+        guard case .succeeded(let original, let rewritten, _)? = rewrite else { return nil }
+        return (original, rewritten)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -27,6 +39,8 @@ struct ClipboardEntryPreviewSidebar: View {
             if let entry {
                 if editingEntryID == entry.id {
                     textEditor(entry)
+                } else if let held = heldRewrite {
+                    rewriteComparison(held.original, held.rewritten, entry: entry)
                 } else if entry.kind == .text {
                     textPreview(entry)
                 } else {
@@ -83,6 +97,40 @@ struct ClipboardEntryPreviewSidebar: View {
         }
         return ClipboardTextPreview(text: pretty.text,
                                     font: .monospacedSystemFont(ofSize: 11.5, weight: .regular))
+    }
+
+    /// Before and After, each in the same text view as the plain preview.
+    private func rewriteComparison(_ original: String, _ rewritten: String,
+                                   entry: ClipboardHistoryEntry) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            rewriteHeading(rewriteText.before)
+            ClipboardTextPreview(text: original)
+                .accessibilityLabel(rewriteText.before)
+            Divider()
+            rewriteHeading(rewriteText.after)
+            ClipboardTextPreview(text: rewritten)
+                .accessibilityLabel(rewriteText.after)
+            if unsavedRewriteEntryID == entry.id {
+                Text(rewriteText.notSaved)
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(Color.red.opacity(0.85))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+            }
+        }
+        .frame(maxHeight: .infinity)
+    }
+
+    private func rewriteHeading(_ title: String) -> some View {
+        Text(title.uppercased())
+            .font(.system(size: 9.5, weight: .semibold))
+            .foregroundStyle(.secondary)
+            .tracking(0.6)
+            .padding(.horizontal, 12)
+            .padding(.top, 8)
+            .padding(.bottom, 2)
+            .accessibilityHidden(true)
     }
 
     private func contentScrollView(_ entry: ClipboardHistoryEntry) -> some View {
@@ -285,6 +333,8 @@ struct ClipboardEntryPreviewSidebar: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(!ClipboardHistoryEditing.canSave(original: entry.text, draft: draft))
+            } else if let held = heldRewrite {
+                rewriteFooter(held.rewritten, entry: entry)
             } else {
                 if entry.kind == .text {
                     Button(text.edit) {
@@ -306,6 +356,46 @@ struct ClipboardEntryPreviewSidebar: View {
         .controlSize(.mini)
         .padding(.horizontal, 12)
         .padding(.vertical, 9)
+    }
+
+    /// Use, Copy and Discard take the place of Edit and Copy while a rewrite
+    /// is held, so the entry cannot be edited under its own result.
+    @ViewBuilder
+    private func rewriteFooter(_ rewritten: String, entry: ClipboardHistoryEntry) -> some View {
+        Button(rewriteText.discard) {
+            unsavedRewriteEntryID = nil
+            QuillRewriteService.shared.discard(entryID: entry.id)
+        }
+        Button(rewriteText.copy) {
+            copyRewrite(rewritten, of: entry)
+        }
+        Button(rewriteText.use) {
+            useRewrite(rewritten, of: entry)
+        }
+        .buttonStyle(.borderedProminent)
+    }
+
+    /// Adds the rewrite to the history, then pastes it as a click on its row
+    /// would. A refused text is neither kept nor copied.
+    private func useRewrite(_ rewritten: String, of entry: ClipboardHistoryEntry) {
+        guard let added = ClipboardHistoryService.shared.addRewrittenText(rewritten) else {
+            unsavedRewriteEntryID = entry.id
+            return
+        }
+        unsavedRewriteEntryID = nil
+        QuillRewriteService.shared.discard(entryID: entry.id)
+        ClipboardHistoryService.shared.copyQuickEntry(added)
+    }
+
+    /// Adds the rewrite to the history and copies it without pasting.
+    private func copyRewrite(_ rewritten: String, of entry: ClipboardHistoryEntry) {
+        guard let added = ClipboardHistoryService.shared.addRewrittenText(rewritten) else {
+            unsavedRewriteEntryID = entry.id
+            return
+        }
+        unsavedRewriteEntryID = nil
+        QuillRewriteService.shared.discard(entryID: entry.id)
+        ClipboardHistoryService.shared.copyOnlyQuickEntry(added)
     }
 
     /// The picture an image entry or a single copied image file holds.

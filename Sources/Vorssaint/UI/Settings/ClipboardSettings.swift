@@ -104,6 +104,10 @@ struct ClipboardSettings: View {
                 clipboardAutoClearSection
             }
 
+            if AppFeature.quillRewrite.isAvailable {
+                QuillRewriteModeSection(language: l10n.language)
+            }
+
             if AppFeature.finderCutPaste.isAvailable {
                 Section {
                     Toggle(text.pasteImageAsFile, isOn: $pasteImageAsFile)
@@ -314,5 +318,39 @@ struct ClipboardSettings: View {
                     .modifier(ClipboardClearRecentConfirmation(entryIDs: $clearingIDs))
                 }
             }
+    }
+}
+
+/// The mode a plain "Rewrite with quill" uses. The modes are read from quill
+/// when the section appears and are never stored; only the choice is.
+private struct QuillRewriteModeSection: View {
+    let language: AppLanguage
+    @ObservedObject private var rewrite = QuillRewriteService.shared
+    @AppStorage(DefaultsKey.quillRewriteDefaultMode) private var defaultMode = ""
+
+    private var strings: QuillRewriteStrings { QuillRewriteStrings.localized(language) }
+
+    /// A stored mode quill no longer lists stays selectable instead of
+    /// leaving the picker without a selection.
+    private var keepsStoredMode: Bool {
+        !defaultMode.isEmpty && !(rewrite.modes ?? []).contains { $0.id == defaultMode }
+    }
+
+    var body: some View {
+        Section {
+            Picker(strings.settingsLabel, selection: $defaultMode) {
+                Text(strings.quillDefault).tag("")
+                ForEach(rewrite.modes ?? [], id: \.id) { mode in
+                    Text(mode.name).tag(mode.id)
+                }
+                if keepsStoredMode {
+                    Text(defaultMode).tag(defaultMode)
+                }
+            }
+            Text(strings.hubCaption)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .onAppear { rewrite.loadModes() }
     }
 }

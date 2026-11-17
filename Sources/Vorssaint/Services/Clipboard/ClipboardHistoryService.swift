@@ -995,6 +995,13 @@ final class ClipboardHistoryService: ObservableObject {
         return entries.first { $0.id == added.entry.id }
     }
 
+    /// Selects an entry whose rewrite just finished, so the preview shows it.
+    func selectRewrittenEntry(_ id: UUID) {
+        guard entries.contains(where: { $0.id == id }) else { return }
+        quickSelectionID = id
+        quickSelectionIsVisible = true
+    }
+
     func trimToLimit() {
         let limit = Defaults.sanitizedClipboardHistoryLimit(
             UserDefaults.standard.integer(forKey: DefaultsKey.clipboardHistoryLimit)
@@ -1280,6 +1287,7 @@ final class ClipboardHistoryService: ObservableObject {
 
     func showHistoryWindow(preferNotch: Bool = true) {
         if preferNotch, NotchSupport.routesClipboardWindow(), NotchService.shared.showClipboard() { return }
+        QuillRewriteService.refreshForPanel()
         let panel = ensurePanel()
         rememberPasteTarget()
         refreshQuickLayout()
@@ -1521,6 +1529,15 @@ final class ClipboardHistoryService: ObservableObject {
                 }
                 if modifiers.isEmpty {
                     self.copySelectedQuickEntry()
+                    return nil
+                }
+                // Option+Return opens the selected text entry's quill modes.
+                if QuillRewriteSupport.claimsModePicker(keyCode: event.keyCode, modifiers: modifiers,
+                                                        selectedKind: self.selectedQuickEntry?.kind,
+                                                        rewriteAvailable: AppFeature.quillRewrite.isAvailable,
+                                                        historyAvailable: AppFeature.clipboardHistory.isAvailable),
+                   let entry = self.selectedQuickEntry {
+                    QuillRewriteService.shared.showModePicker(for: entry)
                     return nil
                 }
                 return event

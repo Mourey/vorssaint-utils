@@ -19,6 +19,8 @@ enum QuillRewriteTests {
         sessionChecks(suite)
         availabilityChecks(suite)
         historyChecks(suite)
+        failureLifetimeChecks(suite)
+        interfaceContractChecks(suite)
     }
 
     // MARK: Preference (R4.2)
@@ -515,5 +517,160 @@ enum QuillRewriteTests {
         suite.expect(calls.allSatisfy { $0 != nil }
                      && zip(calls, calls.dropFirst()).allSatisfy { $0! < $1! },
                      "addRewrittenText adds through entriesAddingText, then trims and saves")
+    }
+
+    // MARK: Failure lifetime (R2.3, C5)
+
+    static func failureLifetimeChecks(_ suite: TestSuite) {
+        let home = temporaryHome()
+        defer { try? FileManager.default.removeItem(atPath: home) }
+        installQuill(in: home)
+        let failing = ClipboardHistoryEntry(text: "fails")
+        let passing = ClipboardHistoryEntry(text: "passes")
+        let recorder = Recorder { invocation in
+            invocation.input == Data(failing.text.utf8)
+                ? result(1, failing.text, stderr(codeLines[0].0)) : result(0, "Passed.\n")
+        }
+        let session = QuillRewriteSession(home: home, runner: recorder.run, isAvailable: { true },
+                                          background: { $0() }, deliver: { $0() })
+        session.start(entryID: failing.id, text: failing.text, modeID: "task-claude", storedMode: "")
+        session.start(entryID: passing.id, text: passing.text, modeID: "task-claude", storedMode: "")
+        session.clearFailures()
+        suite.expect(session.state(for: failing.id) == nil
+                     && session.state(for: passing.id)
+                         == .succeeded(original: passing.text, rewritten: "Passed.\n", modeName: "task-claude"),
+                     "reopening the panel drops failure messages and keeps held results")
+    }
+
+    // MARK: Interface source contracts (R1.1, R1.2, R1.3, R2.1, R2.2, R3.1, R3.2, R4.1)
+
+    static func source(_ path: String) -> String {
+        (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
+    }
+
+    /// The text after `marker` up to the end of that member, at the usual
+    /// four-space indent.
+    static func body(_ source: String, after marker: String, end: String = "\n    }\n") -> String {
+        source.components(separatedBy: marker).dropFirst().first?.components(separatedBy: end).first ?? ""
+    }
+
+    static func ordered(_ text: String, _ calls: [String]) -> Bool {
+        var cursor = text.startIndex
+        for call in calls {
+            guard let range = text.range(of: call, range: cursor..<text.endIndex) else { return false }
+            cursor = range.upperBound
+        }
+        return true
+    }
+
+    static func count(_ text: String, _ needle: String) -> Int {
+        text.components(separatedBy: needle).count - 1
+    }
+
+    static func interfaceContractChecks(_ suite: TestSuite) {
+        let panel = source("Sources/Vorssaint/UI/MenuPanel/ClipboardQuickPanelView.swift")
+        let sidebar = source("Sources/Vorssaint/UI/MenuPanel/ClipboardEntryPreviewSidebar.swift")
+        let history = source("Sources/Vorssaint/Services/Clipboard/ClipboardHistoryService.swift")
+        let service = source("Sources/Vorssaint/Services/Clipboard/QuillRewriteService.swift")
+        let support = source("Sources/Vorssaint/Services/Clipboard/QuillRewriteSupport.swift")
+        let settings = source("Sources/Vorssaint/UI/Settings/ClipboardSettings.swift")
+        let runtime = source("Sources/Vorssaint/App/FeatureRuntime.swift")
+        suite.expect(![panel, sidebar, history, service, support, settings, runtime].contains(where: \.isEmpty),
+                     "every interface source reads back for its contract")
+
+        // R1.1: the six actions keep their order, and the rewrite items follow.
+        let actions = body(panel, after: "    private func entryActions(")
+        suite.expect(ordered(actions, ["history.copyQuickEntry(entry)", "history.copyOnlyQuickEntry(entry)",
+                                       "history.togglePin(entry)", "history.move(entry, .up)",
+                                       "history.move(entry, .down)", "history.remove(entry)",
+                                       "QuillRewriteSupport.offersRewrite(",
+                                       "QuillRewriteService.shared.start(entry: entry, modeID: nil)",
+                                       "QuillRewriteService.shared.start(entry: entry, modeID: mode.id)"]),
+                     "the entry actions keep their six in order, then offer the rewrite and its mode submenu")
+        let picker = body(panel, after: "    private var modePicker: some View {")
+        let starts = "QuillRewriteService.shared.start("
+        suite.expect(count(actions, starts) == 2 && count(picker, starts) == 1
+                     && count(panel, starts) == count(actions, starts) + count(picker, starts)
+                     && [sidebar, history, settings, runtime].allSatisfy { !$0.contains(starts) },
+                     "only the entry actions and the Option+Return popover start a rewrite")
+
+        // R1.2: Option+Return claims the key before the Return block lets it pass.
+        let monitor = body(history, after: "    private func installKeyMonitor(for panel: NSPanel) {")
+        let afterPlainReturn = monitor.components(separatedBy: "self.copySelectedQuickEntry()").dropFirst().first ?? ""
+        let beforeClaim = afterPlainReturn.components(separatedBy: "QuillRewriteSupport.claimsModePicker(").first ?? ""
+        suite.expect(afterPlainReturn.contains("QuillRewriteSupport.claimsModePicker(")
+                     && !beforeClaim.contains("return event")
+                     && ordered(afterPlainReturn, ["QuillRewriteSupport.claimsModePicker(",
+                                                   "QuillRewriteService.shared.showModePicker(", "return nil",
+                                                   "return event"]),
+                     "Option+Return asks for the mode list before the Return block returns the event")
+        let bindings = ["toggleSelectedQuickEntryBatchSelection", "copySelectedQuickEntryOnly", "copySelectedQuickEntry",
+                        "selectAllQuickEntries", "togglePinSelectedQuickEntry", "removeSelectedQuickEntries",
+                        "moveQuickSelection", "copyQuickEntry(at:", "toggleQuickPreview"]
+        suite.expect(bindings.allSatisfy { monitor.contains($0) },
+                     "every existing binding of the key monitor stays in place")
+
+        // R1.2, R2.1: the row redraws for its rewrite state and its popover.
+        let equality = body(panel, after: "    static func == (lhs: QuickEntryView, rhs: QuickEntryView) -> Bool {")
+        suite.expect(equality.contains("lhs.rewriteState == rhs.rewriteState")
+                     && equality.contains("lhs.showsModePicker == rhs.showsModePicker"),
+                     "QuickEntryView compares its rewrite state and whether it shows the mode list")
+        suite.expect(panel.contains(".accessibilityLabel(rewriteText.rewriting)"),
+                     "the row's progress reads as Rewriting… to VoiceOver")
+
+        // R3.1, R3.2: Use and Copy add the entry first, and copy nothing when it is refused.
+        for (handler, copy) in [("    private func useRewrite(", "ClipboardHistoryService.shared.copyQuickEntry("),
+                                ("    private func copyRewrite(", "ClipboardHistoryService.shared.copyOnlyQuickEntry(")] {
+            let code = body(sidebar, after: handler)
+            let refused = code.components(separatedBy: "addRewrittenText(").dropFirst().first?
+                .components(separatedBy: "else {").dropFirst().first?
+                .components(separatedBy: "}").first ?? "copy"
+            suite.expect(code.contains("guard let added = ClipboardHistoryService.shared.addRewrittenText(")
+                         && ordered(code, ["addRewrittenText(", copy + "added)"])
+                         && refused.contains("return") && !refused.contains("copy"),
+                         "\(handler.trimmingCharacters(in: .whitespaces)) adds the rewrite, then copies it, and copies nothing when it is refused")
+        }
+        let footer = body(sidebar, after: "    private func rewriteFooter(")
+        suite.expect(ordered(footer, ["rewriteText.discard", "rewriteText.copy", "rewriteText.use"])
+                     && !footer.contains("beginEditing"),
+                     "a held result offers Discard, Copy and Use, and no Edit")
+        suite.expect(sidebar.contains(".accessibilityLabel(rewriteText.before)")
+                     && sidebar.contains(".accessibilityLabel(rewriteText.after)"),
+                     "Before and After are labelled for VoiceOver")
+
+        // R4.1: the settings picker shows only with the feature installed.
+        let gated = settings.components(separatedBy: "if AppFeature.quillRewrite.isAvailable {").dropFirst().first ?? ""
+        suite.expect(gated.prefix(120).contains("QuillRewriteModeSection(")
+                     && count(settings, "QuillRewriteModeSection(") == 1,
+                     "the default-mode picker is shown only under AppFeature.quillRewrite.isAvailable")
+
+        // R1.3, R2: quill runs only on a background queue, results land on main.
+        suite.expect(count(service, "BoundedProcessRunner.run(") == 1
+                     && service.contains("background: { work in DispatchQueue.global(qos: .userInitiated).async(execute: work) }")
+                     && service.contains("deliver: { work in DispatchQueue.main.async(execute: work) }"),
+                     "the service hands the runner a global queue and delivers on the main queue")
+        let runs = support.components(separatedBy: "runner(invocation")
+        suite.expect(runs.count == 3 && runs.dropLast().allSatisfy { $0.suffix(80).contains("background { [self] in") },
+                     "the session calls the runner only inside its background block")
+        suite.expect(service.contains("strings: { QuillRewriteStrings.localized(L10n.shared.language) }"),
+                     "messages follow the app's language")
+
+        // R2.2: success selects the entry and presents the preview.
+        let reveal = body(service, after: "    private func reveal(")
+        suite.expect(service.contains("session.onSuccess = { [weak self] id in self?.reveal(id) }")
+                     && ordered(reveal, ["AppFeature.quillRewrite.isAvailable", "selectRewrittenEntry(",
+                                         "setQuickPreviewPresented(true)"]),
+                     "a finished rewrite selects its entry and opens the preview")
+
+        // R1.3: the catalog refreshes each time the panel opens.
+        let show = body(history, after: "    func showHistoryWindow(preferNotch: Bool = true) {")
+        suite.expect(ordered(show, ["routesClipboardWindow()", "QuillRewriteService.refreshForPanel()"]),
+                     "opening the panel refreshes the modes catalog")
+
+        // R4.1: turning the feature off cancels the run in flight.
+        let cancel = body(service, after: "    static func cancelIfUnavailable() {")
+        suite.expect(runtime.contains(".quillRewrite: { QuillRewriteService.cancelIfUnavailable() }")
+                     && cancel.contains("syncAvailability()"),
+                     "the feature's binding cancels a run once the feature is unavailable")
     }
 }

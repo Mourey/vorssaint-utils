@@ -348,6 +348,18 @@ final class QuillRewriteSession: @unchecked Sendable {
         onChange?()
     }
 
+    /// A failure message lasts until the panel opens again; held results and
+    /// a run in flight stay.
+    func clearFailures() {
+        lock.withLock {
+            currentStates = currentStates.filter { _, state in
+                if case .failed = state { return false }
+                return true
+            }
+        }
+        onChange?()
+    }
+
     /// With the feature gone, the run in flight is cancelled and every held
     /// state and the catalog are dropped.
     func syncAvailability() {
