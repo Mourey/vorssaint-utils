@@ -981,6 +981,20 @@ final class ClipboardHistoryService: ObservableObject {
         save()
     }
 
+    /// A rewritten text joins the history the way a copy would, and the
+    /// entry it was made from stays. Nil when the capture rules refuse it.
+    @discardableResult
+    func addRewrittenText(_ text: String) -> ClipboardHistoryEntry? {
+        let rejectsSensitive = UserDefaults.standard.bool(forKey: DefaultsKey.clipboardHistoryFilterSensitiveText)
+        guard let added = ClipboardHistoryEditing.entriesAddingText(text, to: entries, now: Date(),
+                                                                   rejectsSensitive: rejectsSensitive)
+        else { return nil }
+        entries = added.entries
+        trimToLimit()
+        save()
+        return entries.first { $0.id == added.entry.id }
+    }
+
     func trimToLimit() {
         let limit = Defaults.sanitizedClipboardHistoryLimit(
             UserDefaults.standard.integer(forKey: DefaultsKey.clipboardHistoryLimit)

@@ -333,6 +333,28 @@ enum ClipboardHistoryEditing {
         return text != original
     }
 
+    /// Adds a text the app produced itself under the rules a captured copy
+    /// follows: trimmed, never empty, oversized or (with the filter on)
+    /// sensitive-looking, and never twice. A text already held moves that
+    /// entry and keeps its id; a new one lands first among the recent
+    /// entries with no source app. Nil means the text was refused.
+    static func entriesAddingText(_ raw: String,
+                                  to entries: [ClipboardHistoryEntry],
+                                  now: Date,
+                                  rejectsSensitive: Bool)
+        -> (entries: [ClipboardHistoryEntry], entry: ClipboardHistoryEntry)? {
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, text.count <= maxCharacters else { return nil }
+        if rejectsSensitive, ClipboardHistorySensitiveText.looksSensitive(text) { return nil }
+        let existing = entries.first { $0.kind == .text && $0.text == text }
+        var result = entries.filter { !($0.kind == .text && $0.text == text) }
+        let entry = ClipboardHistoryEntry(id: existing?.id ?? UUID(), text: text, copiedAt: now,
+                                          pinnedAt: existing?.pinnedAt)
+        let position = entry.isPinned ? 0 : (result.firstIndex { !$0.isPinned } ?? result.endIndex)
+        result.insert(entry, at: position)
+        return (result.filter(\.isPinned) + result.filter { !$0.isPinned }, entry)
+    }
+
     /// `retentionDays` drops recent entries copied longer ago than that, even
     /// under `recentLimit`; 0 keeps them. Pinned entries never expire, and
     /// `ageExemptIDs` (an entry open in the editor) wait until they are let go.

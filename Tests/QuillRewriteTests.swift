@@ -18,6 +18,7 @@ enum QuillRewriteTests {
         executableChecks(suite)
         sessionChecks(suite)
         availabilityChecks(suite)
+        historyChecks(suite)
     }
 
     // MARK: Preference (R4.2)
@@ -463,5 +464,56 @@ enum QuillRewriteTests {
         suite.expect(session.state(for: entry.id) == nil && session.state(for: other.id) == nil,
                      "the cancelled run's result is dropped when it arrives")
         suite.expect(!session.isRunning, "nothing is left running")
+    }
+
+    // MARK: History insert (R3.1)
+
+    static func historyChecks(_ suite: TestSuite) {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        var pinned = ClipboardHistoryEntry(text: "pinned", copiedAt: now.addingTimeInterval(-300),
+                                           pinnedAt: now.addingTimeInterval(-200))
+        pinned.sourceBundleID = "com.example.pinned"
+        var first = ClipboardHistoryEntry(text: "first recent", copiedAt: now.addingTimeInterval(-60))
+        first.sourceBundleID = "com.example.first"
+        let second = ClipboardHistoryEntry(text: "second recent", copiedAt: now.addingTimeInterval(-120))
+        let history = [pinned, first, second]
+        let add = ClipboardHistoryEditing.entriesAddingText(_:to:now:rejectsSensitive:)
+
+        let added = add("new", history, now, true)
+        suite.expect(added?.entries.count == 4
+                     && added?.entries.first == pinned
+                     && added?.entries.dropFirst(2).map(\.id) == [first.id, second.id]
+                     && added?.entries.dropFirst(2).map(\.text) == [first.text, second.text],
+                     "adding a text keeps every entry with its id and text")
+        suite.expect(added?.entries[1].text == "new" && added?.entries[1].sourceBundleID == nil
+                     && added?.entries[1].isPinned == false && added?.entries[1].copiedAt == now
+                     && added?.entry == added?.entries[1],
+                     "the new text lands first among the recent entries with no source app")
+
+        let moved = add("  second recent\n", history, now, true)
+        suite.expect(moved?.entries.map(\.id) == [pinned.id, second.id, first.id]
+                     && moved?.entries.filter { $0.text == second.text }.count == 1
+                     && moved?.entry.id == second.id && moved?.entry.copiedAt == now,
+                     "a text already in the history moves that entry and keeps its id, without a duplicate")
+
+        let sensitive = "STRIPE_SECRET_KEY=exampleCredential"
+        for refused in ["", "  \n\t ", String(repeating: "a", count: ClipboardHistoryEditing.maxCharacters + 1)] {
+            suite.expect(add(refused, history, now, false) == nil,
+                         "an empty, blank or oversized text is refused (\(refused.count) characters)")
+        }
+        suite.expect(add(sensitive, history, now, true) == nil,
+                     "a sensitive-looking text is refused while the sensitive filter is on")
+        suite.expect(add(sensitive, history, now, false)?.entries[1].text == sensitive,
+                     "a sensitive-looking text is kept while the sensitive filter is off")
+
+        let service = (try? String(contentsOfFile: "Sources/Vorssaint/Services/Clipboard/ClipboardHistoryService.swift",
+                                   encoding: .utf8)) ?? ""
+        let body = service.components(separatedBy: "    func addRewrittenText(").dropFirst().first?
+            .components(separatedBy: "\n    }\n").first ?? ""
+        let calls = ["ClipboardHistoryEditing.entriesAddingText(", "trimToLimit()", "save()"]
+            .map { body.range(of: $0)?.lowerBound }
+        suite.expect(calls.allSatisfy { $0 != nil }
+                     && zip(calls, calls.dropFirst()).allSatisfy { $0! < $1! },
+                     "addRewrittenText adds through entriesAddingText, then trims and saves")
     }
 }
