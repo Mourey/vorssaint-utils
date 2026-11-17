@@ -289,7 +289,7 @@ final class FeatureRuntime: ObservableObject {
             NotchFileToolsService.shared.syncWithPreferences()
         },
         .urlCleaner: { URLCleanerService.shared.syncWithPreferences() },
-        .quillRewrite: { QuillRewriteService.cancelIfUnavailable() },
+        .quillRewrite: { MainActor.assumeIsolated { QuillRewriteService.cancelIfUnavailable() } },
         .diskImageInstaller: { DiskImageInstallerService.shared.syncWithPreferences() },
         .mixer: {
             PreciseVolumeRollerService.shared.syncWithPreferences()

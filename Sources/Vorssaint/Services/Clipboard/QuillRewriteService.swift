@@ -3,11 +3,12 @@
 
 import Foundation
 
-/// Rewrite with quill for the clipboard panel. Used from the main thread: it
+/// Rewrite with quill for the clipboard panel, on the main actor. It
 /// publishes the session's states, the loaded modes and the entry whose mode
 /// list is open, runs quill on a background queue and lands every result on
 /// the main queue. Nothing about a rewrite is stored; a held result lives
 /// until Use, Copy, Discard, the entry's next rewrite or quit.
+@MainActor
 final class QuillRewriteService: ObservableObject {
     private static var instance: QuillRewriteService?
 
@@ -42,7 +43,8 @@ final class QuillRewriteService: ObservableObject {
     private init() {
         session = QuillRewriteSession(
             home: FileManager.default.homeDirectoryForCurrentUser.path,
-            runner: { invocation, cancellation in
+            // Nonisolated: the session calls it on the background queue.
+            runner: { @Sendable invocation, cancellation in
                 BoundedProcessRunner.run(invocation.executable, invocation.arguments,
                                          input: invocation.input,
                                          timeout: invocation.timeout,
@@ -55,8 +57,9 @@ final class QuillRewriteService: ObservableObject {
             background: { work in DispatchQueue.global(qos: .userInitiated).async(execute: work) },
             deliver: { work in DispatchQueue.main.async(execute: work) },
             strings: { QuillRewriteStrings.localized(L10n.shared.language) })
-        session.onChange = { [weak self] in self?.publish() }
-        session.onSuccess = { [weak self] id in self?.reveal(id) }
+        // The session calls back on the main queue it was given.
+        session.onChange = { [weak self] in MainActor.assumeIsolated { self?.publish() } }
+        session.onSuccess = { [weak self] id in MainActor.assumeIsolated { self?.reveal(id) } }
     }
 
     /// `modeID` nil rewrites with the default mode from Clipboard settings.

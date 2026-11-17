@@ -577,6 +577,9 @@ enum QuillRewriteTests {
         let runtime = source("Sources/Vorssaint/App/FeatureRuntime.swift")
         suite.expect(![panel, sidebar, history, service, support, settings, runtime].contains(where: \.isEmpty),
                      "every interface source reads back for its contract")
+        suite.expect(service.contains("@MainActor\nfinal class QuillRewriteService: ObservableObject {")
+                     && history.contains("MainActor.assumeIsolated { QuillRewriteService.shared.showModePicker(for: entry) }"),
+                     "the rewrite service lives on the main actor, and nonisolated callers assume it")
 
         // R1.1: the six actions keep their order, and the rewrite items follow.
         let actions = body(panel, after: "    private func entryActions(")
@@ -657,19 +660,19 @@ enum QuillRewriteTests {
 
         // R2.2: success selects the entry and presents the preview.
         let reveal = body(service, after: "    private func reveal(")
-        suite.expect(service.contains("session.onSuccess = { [weak self] id in self?.reveal(id) }")
+        suite.expect(service.contains("session.onSuccess = { [weak self] id in MainActor.assumeIsolated { self?.reveal(id) } }")
                      && ordered(reveal, ["AppFeature.quillRewrite.isAvailable", "selectRewrittenEntry(",
                                          "setQuickPreviewPresented(true)"]),
                      "a finished rewrite selects its entry and opens the preview")
 
         // R1.3: the catalog refreshes each time the panel opens.
         let show = body(history, after: "    func showHistoryWindow(preferNotch: Bool = true) {")
-        suite.expect(ordered(show, ["routesClipboardWindow()", "QuillRewriteService.refreshForPanel()"]),
+        suite.expect(ordered(show, ["routesClipboardWindow()", "MainActor.assumeIsolated { QuillRewriteService.refreshForPanel() }"]),
                      "opening the panel refreshes the modes catalog")
 
         // R4.1: turning the feature off cancels the run in flight.
         let cancel = body(service, after: "    static func cancelIfUnavailable() {")
-        suite.expect(runtime.contains(".quillRewrite: { QuillRewriteService.cancelIfUnavailable() }")
+        suite.expect(runtime.contains(".quillRewrite: { MainActor.assumeIsolated { QuillRewriteService.cancelIfUnavailable() } }")
                      && cancel.contains("syncAvailability()"),
                      "the feature's binding cancels a run once the feature is unavailable")
     }

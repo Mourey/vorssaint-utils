@@ -256,8 +256,8 @@ final class QuillRewriteSession: @unchecked Sendable {
     private let runner: Runner
     private let isAvailable: () -> Bool
     private let makeCancellation: () -> BoundedProcessCancellation
-    private let background: (@escaping () -> Void) -> Void
-    private let deliver: (@escaping () -> Void) -> Void
+    private let background: (@escaping @Sendable () -> Void) -> Void
+    private let deliver: (@escaping @Sendable () -> Void) -> Void
     private let strings: () -> QuillRewriteStrings
     private let lock = NSLock()
     private var currentStates: [UUID: QuillRewriteState] = [:]
@@ -274,8 +274,8 @@ final class QuillRewriteSession: @unchecked Sendable {
          runner: @escaping Runner,
          isAvailable: @escaping () -> Bool,
          makeCancellation: @escaping () -> BoundedProcessCancellation = { BoundedProcessCancellation() },
-         background: @escaping (@escaping () -> Void) -> Void,
-         deliver: @escaping (@escaping () -> Void) -> Void,
+         background: @escaping (@escaping @Sendable () -> Void) -> Void,
+         deliver: @escaping (@escaping @Sendable () -> Void) -> Void,
          strings: @escaping () -> QuillRewriteStrings = { .english }) {
         self.home = home
         self.fileManager = fileManager

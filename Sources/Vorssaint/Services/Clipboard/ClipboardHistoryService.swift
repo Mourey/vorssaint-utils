@@ -1287,7 +1287,7 @@ final class ClipboardHistoryService: ObservableObject {
 
     func showHistoryWindow(preferNotch: Bool = true) {
         if preferNotch, NotchSupport.routesClipboardWindow(), NotchService.shared.showClipboard() { return }
-        QuillRewriteService.refreshForPanel()
+        MainActor.assumeIsolated { QuillRewriteService.refreshForPanel() }
         let panel = ensurePanel()
         rememberPasteTarget()
         refreshQuickLayout()
@@ -1537,7 +1537,7 @@ final class ClipboardHistoryService: ObservableObject {
                                                         rewriteAvailable: AppFeature.quillRewrite.isAvailable,
                                                         historyAvailable: AppFeature.clipboardHistory.isAvailable),
                    let entry = self.selectedQuickEntry {
-                    QuillRewriteService.shared.showModePicker(for: entry)
+                    MainActor.assumeIsolated { QuillRewriteService.shared.showModePicker(for: entry) }
                     return nil
                 }
                 return event
