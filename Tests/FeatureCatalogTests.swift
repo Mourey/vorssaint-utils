@@ -386,7 +386,7 @@ enum FeatureCatalogTests {
 
         // MARK: Features hub catalog
 
-        suite.expect(AppFeature.allCases.count == 77, "feature catalog has 77 features")
+        suite.expect(AppFeature.allCases.count == 78, "feature catalog has 78 features")
         suite.expect(Set(AppFeature.allCases.map(\.rawValue)).count == AppFeature.allCases.count,
                "feature ids are unique")
         suite.expect(AppFeature.allCases.map(\.rawValue) == [
@@ -394,6 +394,7 @@ enum FeatureCatalogTests {
             "scrollInverter", "scrollHorizontal", "focusFollowsMouse", "smoothScroll", "linearScroll", "mouseAcceleration", "mouseNavigation", "mouseButtonShortcuts", "middleClick",
             "mouseClickDebounce", "keyboardDebounce", "textSnippets", "superKey", "quitWindowProtection",
             "clipboardHistory", "pastePlain", "finderCutPaste", "finderRename", "shelf", "urlCleaner",
+            "quillRewrite",
             "diskImageInstaller",
             "mixer", "soundOutputSwitcher", "audioPriority", "micMute", "musicBlock",
             "keepAwake", "brightness", "extraBrightness", "bluetoothSleep",
@@ -403,6 +404,13 @@ enum FeatureCatalogTests {
             "monitorCPU", "monitorGPU", "monitorMemory", "monitorNetwork", "monitorDisk", "monitorPower",
             "connectedDevices", "fanControl",
         ], "feature ids are stable (they persist inside availability keys)")
+        suite.expect(AppFeature.allCases.contains(.quillRewrite)
+                     && !AppFeature.quillRewrite.installedByDefault
+                     && AppFeature.availabilityDefaults[AppFeature.quillRewrite.availabilityKey] as? Bool == false
+                     && AppFeature.quillRewrite.group == .clipboardFiles
+                     && AppFeature.quillRewrite.enabledKeys.isEmpty
+                     && AppFeature.quillRewrite.permissions.isEmpty,
+                     "rewrite with quill is an opt-in, on-demand clipboard feature without permissions")
         suite.expect(MouseAccelerationSupport.validatedRegistryID(nil) == nil
                 && MouseAccelerationSupport.validatedRegistryID(0) == nil
                 && MouseAccelerationSupport.validatedRegistryID(42) == 42,
